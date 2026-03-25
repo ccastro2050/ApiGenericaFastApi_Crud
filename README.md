@@ -287,14 +287,111 @@ ApiGenericaFastApi_Crud/
 |       |-- __init__.py
 |       +-- encriptacion_bcrypt.py             <- Hash y verificacion BCrypt
 |
-+-- repositorios/
-    |-- __init__.py
-    |-- abstracciones/
-    |   |-- __init__.py
-    |   +-- i_repositorio_lectura_tabla.py     <- Protocol del repositorio
-    |-- repositorio_lectura_postgresql.py       <- PostgreSQL
-    |-- repositorio_lectura_sqlserver.py        <- SQL Server
-    +-- repositorio_lectura_mysql_mariadb.py    <- MySQL/MariaDB
+|-- repositorios/
+|   |-- __init__.py
+|   |-- abstracciones/
+|   |   |-- __init__.py
+|   |   +-- i_repositorio_lectura_tabla.py     <- Protocol del repositorio
+|   |-- repositorio_lectura_postgresql.py       <- PostgreSQL
+|   |-- repositorio_lectura_sqlserver.py        <- SQL Server
+|   +-- repositorio_lectura_mysql_mariadb.py    <- MySQL/MariaDB
+|
++-- script_bd/
+    |-- bdfacturas_postgres.sql                <- Script PostgreSQL
+    |-- bdfacturas_sqlserver.sql               <- Script SQL Server
+    +-- bdfacturas_mysql_mariadb.sql           <- Script MySQL/MariaDB
+```
+
+---
+
+## Descripcion de Clases y Conceptos Arquitectonicos
+
+### Punto de Entrada
+
+| Archivo | Descripcion | Concepto |
+|---------|-------------|----------|
+| `main.py` | Crea la aplicacion FastAPI, configura CORS, registra el router del controlador y arranca el servidor Uvicorn. Es el unico archivo que se ejecuta directamente. | **Composition Root** — Punto donde se ensamblan todas las piezas de la aplicacion. Aqui se conecta el framework (FastAPI) con los componentes internos sin que estos conozcan al framework. |
+
+### Configuracion
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `Settings` (`config.py`) | Clase que agrupa toda la configuracion de la aplicacion (debug, entorno, base de datos). Usa `pydantic-settings` para leer variables desde archivos `.env` con validacion automatica de tipos. | **Centralized Configuration** — La configuracion vive en un solo lugar y se inyecta donde se necesite, en vez de leer variables de entorno dispersas por el codigo. |
+| `DatabaseSettings` (`config.py`) | Subclase de configuracion que contiene las cadenas de conexion de todos los proveedores de BD. Lee variables con prefijo `DB_` del `.env`. | **Configuration Section** — Agrupa configuraciones relacionadas bajo un mismo objeto, facilitando el acceso (ej: `settings.database.postgres`). |
+| `get_settings()` (`config.py`) | Funcion decorada con `@lru_cache` que retorna siempre la misma instancia de `Settings`. | **Singleton Pattern** — Garantiza una unica instancia de configuracion en toda la aplicacion, evitando lecturas repetidas del `.env`. |
+
+### Capa de Presentacion (Controllers)
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `entidades_controller.py` | Router de FastAPI que expone 6 endpoints HTTP (GET listar, GET por clave, POST crear, PUT actualizar, DELETE eliminar, POST verificar contrasena). Recibe peticiones, valida parametros basicos, delega al servicio y retorna respuestas JSON con codigos HTTP apropiados. | **Controller / Presentation Layer** — Capa mas externa de la arquitectura. Su unica responsabilidad es traducir peticiones HTTP a llamadas de servicio y formatear las respuestas. No contiene logica de negocio ni acceso a datos. |
+
+### Capa de Negocio (Servicios)
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `ServicioCrud` (`servicio_crud.py`) | Coordina las operaciones CRUD aplicando reglas de negocio: valida que nombres de tabla, claves y valores no esten vacios, normaliza esquemas, y delega la ejecucion al repositorio. Para verificar contrasenas, obtiene el hash almacenado y lo compara con BCrypt. | **Service Layer / Business Logic** — Capa intermedia que contiene las reglas del dominio. Recibe un repositorio por constructor (inyeccion de dependencias) y trabaja con la abstraccion `IRepositorioLecturaTabla`, sin conocer que base de datos se usa. |
+| `crear_servicio_crud()` (`fabrica_repositorios.py`) | Funcion que lee `DB_PROVIDER` del `.env`, busca la clase de repositorio correspondiente en un diccionario y crea el `ServicioCrud` con ese repositorio ya instanciado. | **Factory Pattern** — Encapsula la logica de creacion de objetos. El controlador llama a `crear_servicio_crud()` sin saber que repositorio concreto se crea. Agregar un nuevo proveedor de BD = agregar 1 linea al diccionario. |
+
+### Abstracciones (Interfaces / Protocols)
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `IRepositorioLecturaTabla` (`repositorios/abstracciones/`) | Protocol que define 6 metodos que todo repositorio debe implementar: `obtener_filas`, `obtener_por_clave`, `crear`, `actualizar`, `eliminar` y `obtener_hash_contrasena`. | **Interface / Contract (Repository Pattern)** — Define QUE operaciones puede hacer un repositorio, sin definir COMO. Cada proveedor (PostgreSQL, SQL Server, MySQL) implementa estos metodos a su manera. Permite cambiar de base de datos sin modificar el servicio. |
+| `IServicioCrud` (`servicios/abstracciones/`) | Protocol que define los 6 metodos del servicio CRUD: `listar`, `obtener_por_clave`, `crear`, `actualizar`, `eliminar` y `verificar_contrasena`. | **Interface / Contract (Service Pattern)** — Contrato de la capa de negocio. Permite que el controlador dependa de una abstraccion en vez de la implementacion concreta. Facilita pruebas unitarias con mocks. |
+| `IProveedorConexion` (`servicios/abstracciones/`) | Protocol con 2 miembros: propiedad `proveedor_actual` (nombre del proveedor) y metodo `obtener_cadena_conexion()` (cadena de conexion activa). | **Interface / Contract (Strategy Pattern)** — Abstrae la fuente de las cadenas de conexion. Los repositorios reciben un `IProveedorConexion` sin saber si viene de un `.env`, una variable de entorno o un servicio externo. |
+
+### Conexion
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `ProveedorConexion` (`servicios/conexion/`) | Implementacion concreta de `IProveedorConexion`. Lee `DB_PROVIDER` y las cadenas de conexion desde `Settings`. Contiene un diccionario que mapea nombre de proveedor a su cadena correspondiente. | **Concrete Strategy** — Implementacion concreta del contrato `IProveedorConexion`. Centraliza la logica de seleccion de cadena de conexion en un solo lugar, evitando `if/else` dispersos. |
+
+### Capa de Datos (Repositorios)
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `RepositorioLecturaPostgreSQL` (`repositorios/`) | Implementa las 6 operaciones CRUD para PostgreSQL. Usa identificadores con `"comillas dobles"`, `LIMIT` para paginacion, esquema por defecto `public`, y `SQLAlchemy async` con driver `asyncpg`. Convierte tipos (Decimal, datetime, UUID) a formatos serializables JSON. | **Repository Pattern (Concrete Implementation)** — Encapsula todo el acceso a datos especifico de PostgreSQL. La capa de negocio no sabe que existe PostgreSQL; solo llama metodos del contrato `IRepositorioLecturaTabla`. |
+| `RepositorioLecturaSqlServer` (`repositorios/`) | Implementa las 6 operaciones CRUD para SQL Server. Usa identificadores con `[corchetes]`, `TOP(n)` en lugar de `LIMIT`, esquema por defecto `dbo`. Convierte cadenas ODBC a URL de SQLAlchemy (`mssql+aioodbc`). Detecta tipos de columna via `INFORMATION_SCHEMA` para convertir valores correctamente. | **Repository Pattern (Concrete Implementation)** — Misma interfaz, distinta implementacion. Encapsula las particularidades de SQL Server (sintaxis T-SQL, driver ODBC, formato de cadenas de conexion) detras del contrato comun. |
+| `RepositorioLecturaMysqlMariaDB` (`repositorios/`) | Implementa las 6 operaciones CRUD para MySQL y MariaDB. Usa identificadores con `` `backticks` ``, `LIMIT` con parametro, sin esquema tradicional (la BD es el contenedor). Convierte cadenas formato C# (`Server=...;Port=...`) a URL de SQLAlchemy (`mysql+aiomysql`). Maneja tipos adicionales como `timedelta` y `bytes`. | **Repository Pattern (Concrete Implementation)** — Un solo repositorio sirve para MySQL y MariaDB porque comparten sintaxis SQL y driver. Demuestra reutilizacion cuando dos proveedores son compatibles. |
+
+### Utilidades
+
+| Clase / Archivo | Descripcion | Concepto |
+|-----------------|-------------|----------|
+| `encriptar()` (`servicios/utilidades/encriptacion_bcrypt.py`) | Genera un hash BCrypt de 60 caracteres a partir de un texto plano. Configurable con costo (default 12, rango 4-31). | **Utility / Helper** — Funcion pura sin estado ni dependencias externas. Se usa en los repositorios al crear/actualizar registros con campos encriptados. |
+| `verificar()` (`servicios/utilidades/encriptacion_bcrypt.py`) | Compara un texto plano contra un hash BCrypt existente. Retorna `True` si coinciden, `False` en caso contrario. | **Utility / Helper** — Complemento de `encriptar()`. Se usa en `ServicioCrud.verificar_contrasena()` para validar credenciales sin exponer el hash. |
+
+### Scripts de Base de Datos
+
+| Archivo | Descripcion | Contenido |
+|---------|-------------|-----------|
+| `bdfacturas_postgres.sql` | Script DDL + DML para PostgreSQL 10+. | Tablas, constraints, datos de ejemplo, trigger `plpgsql` (INSERT/UPDATE/DELETE en un solo trigger) y 5 stored procedures con parametros `INOUT` tipo JSON. |
+| `bdfacturas_sqlserver.sql` | Script DDL + DML para SQL Server 2016+. | Tablas, constraints, datos de ejemplo, 3 triggers separados (INSERT, UPDATE, DELETE) y 5 stored procedures con `FOR JSON`. |
+| `bdfacturas_mysql_mariadb.sql` | Script DDL + DML para MySQL 8+ / MariaDB 10.5+. | Tablas `InnoDB` con `utf8mb4`, constraints, datos de ejemplo, 3 triggers separados con `SIGNAL SQLSTATE`, y 5 stored procedures con `JSON_OBJECT` / `JSON_ARRAYAGG`. |
+
+### Flujo de una Peticion
+
+```
+1. Cliente HTTP (Swagger, Postman, Frontend)
+        |
+        v
+2. entidades_controller.py          <- Recibe HTTP, valida parametros
+        |
+        v
+3. fabrica_repositorios.py           <- Lee DB_PROVIDER, crea repositorio + servicio
+        |
+        v
+4. ServicioCrud                      <- Aplica reglas de negocio, delega al repositorio
+        |
+        v
+5. RepositorioLectura[Proveedor]     <- Ejecuta SQL especifico del motor
+        |
+        v
+6. Base de Datos                     <- Triggers se ejecutan automaticamente
+        |
+        v
+7. Respuesta JSON al cliente
 ```
 
 ---
